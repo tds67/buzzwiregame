@@ -7,6 +7,12 @@
   --danger: #ff6b6b;
   --good: #3cff9a;
   --wire: rgba(240, 240, 255, 0.85);
+
+  --sat: env(safe-area-inset-top);
+  --sab: env(safe-area-inset-bottom);
+  --sal: env(safe-area-inset-left);
+  --sar: env(safe-area-inset-right);
+
 }
 
 * { box-sizing: border-box; }

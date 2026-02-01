@@ -38,6 +38,15 @@ function setPointerTarget(clientX, clientY) {
   state.mouse.movedAt = performance.now();
 }
 
+function getSafeAreaPx() {
+  // read CSS env(safe-area-*) via computed style on :root
+  const cs = getComputedStyle(document.documentElement);
+  const top = parseFloat(cs.getPropertyValue("--sat")) || 0;
+  const bottom = parseFloat(cs.getPropertyValue("--sab")) || 0;
+  const left = parseFloat(cs.getPropertyValue("--sal")) || 0;
+  const right = parseFloat(cs.getPropertyValue("--sar")) || 0;
+  return { top, bottom, left, right };
+}
 
   function showToast(msg, ms = 900) {
     ui.toast.textContent = msg;
@@ -109,6 +118,10 @@ function setPointerTarget(clientX, clientY) {
     running: false,
     won: false,
     over: false,
+
+    play: { x: 0, y: 0, w: 0, h: 0 },
+    uiScale: 1,
+
 
     startAt: 0,
     now: 0,
@@ -195,15 +208,20 @@ pointer: {
   };
 
   function normToPx(p) {
-    return { x: p.x * state.w, y: p.y * state.h };
-  }
+  // Map normalized coords into the playfield rect
+  return {
+    x: state.play.x + p.x * state.play.w,
+    y: state.play.y + p.y * state.play.h
+  };
+}
+
 
   function makeHellWire(seed = 1337) {
     let s = seed >>> 0;
     const rnd = () => (s = (s * 1664525 + 1013904223) >>> 0) / 4294967296;
 
     const pts = [];
-    let x = 0.08, y = 0.55;
+    let x = 0.03, y = 0.55;
     pts.push({ x, y });
 
     const n = 140;
@@ -213,15 +231,15 @@ pointer: {
       const dx = (rnd() < backChance) ? -forward * (0.2 + rnd() * 0.5) : forward;
       const dy = (rnd() - 0.5) * (0.08 + rnd() * 0.09);
 
-      x = clamp(x + dx, 0.06, 0.94);
-      y = clamp(y + dy, 0.08, 0.92);
+      x = clamp(x + dx, 0.02, 0.98);
+      y = clamp(y + dy, 0.02, 0.98);
 
-      if (i % 19 === 0) {
-        y = clamp(y + (rnd() < 0.5 ? -1 : 1) * (0.18 + rnd() * 0.22), 0.08, 0.92);
-      }
+     if (i % 19 === 0) {
+  y = clamp(y + (rnd() < 0.5 ? -1 : 1) * (0.18 + rnd() * 0.22), 0.02, 0.98);
+}
       pts.push({ x, y });
     }
-    pts[pts.length - 1] = { x: 0.92, y: 0.52 };
+    pts[pts.length - 1] = { x: 0.97, y: 0.52 };
 
     const injectAt = [32, 64, 101];
     for (const idx of injectAt) {
@@ -295,11 +313,25 @@ function resize() {
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
   // UI scaling for mobile
-  state.uiScale = clamp(Math.min(state.w, state.h) / 800, 0.78, 1.15);
+state.uiScale = clamp(Math.min(state.w, state.h) / 520, 1.0, 1.45);
 
-  // Scale ring a bit so it feels consistent across devices
-  player.outerR = 20 * state.uiScale;
-  player.innerR = 13 * state.uiScale;
+// Measure the HUD so we don't guess padding
+const hudEl = document.querySelector(".hud");
+const hudRect = hudEl ? hudEl.getBoundingClientRect() : { bottom: 0 };
+
+const sidePad = 10 * state.uiScale;
+const topPad = hudRect.bottom + (10 * state.uiScale);
+const bottomPad = 18 * state.uiScale;
+
+state.play.x = sidePad;
+state.play.y = topPad;
+state.play.w = Math.max(1, state.w - sidePad * 2);
+state.play.h = Math.max(1, state.h - topPad - bottomPad);
+
+
+// Scale ring with UI scale
+player.outerR = 20 * state.uiScale;
+player.innerR = 13 * state.uiScale;
 
   rebuildWireSamples();
   if (!state.running) startPosition();
@@ -605,11 +637,11 @@ function computeControlAccel(dt, t) {
   const sUI = state.uiScale || 1;
 
 ctx.strokeStyle = "rgba(240,240,255,0.22)";
-ctx.lineWidth = 14 * sUI;
+ctx.lineWidth = 20 * sUI;
 ctx.stroke();
 
 ctx.strokeStyle = "rgba(240,240,255,0.65)";
-ctx.lineWidth = 6 * sUI;
+ctx.lineWidth = 8 * sUI;
 ctx.stroke();
 
     const start = normToPx(wire.curr[0]);
@@ -754,15 +786,21 @@ player.vy *= drag;
       player.x += player.vx * dt;
       player.y += player.vy * dt;
 
-      player.x = clamp(player.x, 10, state.w - 10);
-      player.y = clamp(player.y, 10, state.h - 10);
+    const pad = 10 * (state.uiScale || 1);
+player.x = clamp(player.x, state.play.x + pad, state.play.x + state.play.w - pad);
+player.y = clamp(player.y, state.play.y + pad, state.play.y + state.play.h - pad);
+
 
       nearest = nearestOnWire(player.x, player.y);
       const d = Math.sqrt(nearest.d2);
 
-      const wireRadius = 3;
-      const margin = 1.2; // tiny bit more mercy
-      let allowed = player.innerR - wireRadius - margin;
+      const sUI = state.uiScale || 1;
+
+// keep collision proportional to visuals
+const wireRadius = 3 * sUI;
+const margin = 1.2 * sUI;
+let allowed = player.innerR - wireRadius - margin;
+
 
       if (t < state.pinchUntil) allowed *= 0.72;
 
