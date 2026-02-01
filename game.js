@@ -104,7 +104,12 @@
 
     controlMode: "mouse", // "mouse" or "keys"
     keys: new Set(),
-    mouse: { x: 0, y: 0, movedAt: 0 },
+   mouse: {
+  x: 0, y: 0,           // smoothed
+  rawX: 0, rawY: 0,     // raw cursor
+  movedAt: 0
+},
+
 
     sabotageText: "No sabotage… yet.",
     sabotageUntil: 0,
@@ -134,23 +139,28 @@
   };
 
   const player = {
-    x: 0,
-    y: 0,
-    vx: 0,
-    vy: 0,
+  x: 0,
+  y: 0,
+  vx: 0,
+  vy: 0,
 
-    outerR: 20,
-    innerR: 13,
+  outerR: 20,
+  innerR: 13,
 
-    // ✅ FAIRER CONTROLS (still hard, just less unfair)
-    accel: 1450,     // was 1800
-    maxSpeed: 720,   // was 900
-    drag: 3.2,       // was 2.1 (more drag = less skating)
-    jitter: 14,      // was 28 (less chaos)
-    lag: 0.08,       // was 0.11 (slightly more responsive)
+  // Fairer mouse feel (still hard overall)
+  maxSpeed: 650,      // slightly lower top speed
+  drag: 4.2,          // more friction = less skating
+  lag: 0.06,          // more responsive
 
-    mouseDeadzone: 14 // ✅ NEW: ignore tiny cursor offsets
-  };
+  // Mouse steering tuning
+  mouseSmooth: 0.16,  // 0..1 (higher = more immediate, lower = smoother)
+  arriveRadius: 120,  // slows down when close to cursor
+  steering: 14.0,     // how strongly velocity snaps toward desired velocity
+
+  // Keyboard still can have some chaos
+  accelKeys: 1200,
+  jitterKeys: 70
+};
 
   const wire = {
     base: [],
@@ -274,9 +284,13 @@
       // Clear any “stuck” inputs so nothing carries over from the menu
       state.keys.clear();
       // Reset mouse target to ring position so it doesn't jump
-      state.mouse.x = player.x;
-      state.mouse.y = player.y;
-      state.mouse.movedAt = performance.now();
+      // Reset mouse targets to ring position so it never jumps
+state.mouse.rawX = player.x;
+state.mouse.rawY = player.y;
+state.mouse.x = player.x;
+state.mouse.y = player.y;
+state.mouse.movedAt = performance.now();
+
       // Also kill motion
       player.vx = 0;
       player.vy = 0;
@@ -369,79 +383,96 @@
   // Controls
   // -------------------------
   function computeControlAccel(dt, t) {
-    if (!state.inputEnabled) return { ax: 0, ay: 0 };
+  if (!state.inputEnabled) return { ax: 0, ay: 0 };
 
-    const mode = state.controlMode === "mouse" ? "mouse" : "keys";
-    ui.mode.textContent = mode === "mouse" ? "Mouse" : "Keyboard";
+  const mode = state.controlMode === "mouse" ? "mouse" : "keys";
+  ui.mode.textContent = mode === "mouse" ? "Mouse" : "Keyboard";
 
-    let ax = 0, ay = 0;
+  let ax = 0, ay = 0;
 
-    if (mode === "mouse") {
-      const dx = state.mouse.x - player.x;
-      const dy = state.mouse.y - player.y;
-      const len = Math.hypot(dx, dy) || 1;
+  if (mode === "mouse") {
+    // Smooth raw cursor -> stable target
+    const s = 1 - Math.exp(-dt / player.mouseSmooth);
+    state.mouse.x = lerp(state.mouse.x, state.mouse.rawX, s);
+    state.mouse.y = lerp(state.mouse.y, state.mouse.rawY, s);
 
-      // ✅ Deadzone: prevents tiny cursor jitter from causing movement
-      if (len > player.mouseDeadzone) {
-        const ux = dx / len;
-        const uy = dy / len;
-        ax += ux * player.accel;
-        ay += uy * player.accel;
-      }
+    const dx = state.mouse.x - player.x;
+    const dy = state.mouse.y - player.y;
+    const dist = Math.hypot(dx, dy) || 1;
 
-      // smaller wobble than before
-      const wob = (t * 0.0065);
-      ax += Math.sin(wob * 1.9) * 160;
-      ay += Math.cos(wob * 1.4) * 160;
+    // Desired speed ramps up with distance, slows when close (arrive behavior)
+    const ramp = clamp(dist / player.arriveRadius, 0, 1);
+    const desiredSpeed = player.maxSpeed * ramp;
 
-    } else {
-      const up = state.keys.has("ArrowUp") || state.keys.has("KeyW");
-      const down = state.keys.has("ArrowDown") || state.keys.has("KeyS");
-      const left = state.keys.has("ArrowLeft") || state.keys.has("KeyA");
-      const right = state.keys.has("ArrowRight") || state.keys.has("KeyD");
+    const desiredVx = (dx / dist) * desiredSpeed;
+    const desiredVy = (dy / dist) * desiredSpeed;
 
-      let ix = (right ? 1 : 0) - (left ? 1 : 0);
-      let iy = (down ? 1 : 0) - (up ? 1 : 0);
+    // Steering: accelerate to match desired velocity (very stable & fair)
+    ax = (desiredVx - player.vx) * player.steering;
+    ay = (desiredVy - player.vy) * player.steering;
 
-      const len = Math.hypot(ix, iy) || 1;
-      ix /= len; iy /= len;
-
-      ax += ix * player.accel;
-      ay += iy * player.accel;
-
-      // smaller tremor
-      ax += (Math.random() - 0.5) * 80;
-      ay += (Math.random() - 0.5) * 80;
-    }
-
-    // Lag smoothing (more responsive than original)
-    computeControlAccel._lax ??= 0;
-    computeControlAccel._lay ??= 0;
-    computeControlAccel._lax = lerp(computeControlAccel._lax, ax, 1 - Math.exp(-dt / player.lag));
-    computeControlAccel._lay = lerp(computeControlAccel._lay, ay, 1 - Math.exp(-dt / player.lag));
-    ax = computeControlAccel._lax;
-    ay = computeControlAccel._lay;
-
-    // sabotage modifiers
+    // Sabotage effects can still mess you up (but only when active)
     if (t < state.invertUntil) { ax *= -1; ay *= -1; }
+
     if (t < state.windUntil) {
-      const w = (t * 0.002);
-      ax += Math.sin(w) * 780;
-      ay += Math.cos(w * 1.3) * 780;
+      const w = t * 0.002;
+      ax += Math.sin(w) * 650;
+      ay += Math.cos(w * 1.3) * 650;
     }
+
     if (t < state.wobbleUntil) {
       const w = t * 0.01;
-      ax += Math.sin(w * 2.7) * 1050;
-      ay += Math.cos(w * 2.2) * 1050;
+      ax += Math.sin(w * 2.7) * 900;
+      ay += Math.cos(w * 2.2) * 900;
       state.shake = Math.max(state.shake, 5);
     }
 
-    // baseline jitter reduced
-    ax += (Math.random() - 0.5) * player.jitter * 18;
-    ay += (Math.random() - 0.5) * player.jitter * 18;
+    // NOTE: no baseline jitter/wobble in mouse mode anymore (fixes “steadiness” complaints)
 
-    return { ax, ay };
+  } else {
+    // Keyboard: still challenging, but not ridiculous
+    const up = state.keys.has("ArrowUp") || state.keys.has("KeyW");
+    const down = state.keys.has("ArrowDown") || state.keys.has("KeyS");
+    const left = state.keys.has("ArrowLeft") || state.keys.has("KeyA");
+    const right = state.keys.has("ArrowRight") || state.keys.has("KeyD");
+
+    let ix = (right ? 1 : 0) - (left ? 1 : 0);
+    let iy = (down ? 1 : 0) - (up ? 1 : 0);
+
+    const len = Math.hypot(ix, iy) || 1;
+    ix /= len; iy /= len;
+
+    ax += ix * player.accelKeys;
+    ay += iy * player.accelKeys;
+
+    // small tremor only for keys
+    ax += (Math.random() - 0.5) * player.jitterKeys;
+    ay += (Math.random() - 0.5) * player.jitterKeys;
+
+    if (t < state.invertUntil) { ax *= -1; ay *= -1; }
+    if (t < state.windUntil) {
+      const w = t * 0.002;
+      ax += Math.sin(w) * 650;
+      ay += Math.cos(w * 1.3) * 650;
+    }
+    if (t < state.wobbleUntil) {
+      const w = t * 0.01;
+      ax += Math.sin(w * 2.7) * 900;
+      ay += Math.cos(w * 2.2) * 900;
+      state.shake = Math.max(state.shake, 5);
+    }
   }
+
+  // Slight lag smoothing (helps both modes)
+  computeControlAccel._lax ??= 0;
+  computeControlAccel._lay ??= 0;
+  const lagBlend = 1 - Math.exp(-dt / player.lag);
+  computeControlAccel._lax = lerp(computeControlAccel._lax, ax, lagBlend);
+  computeControlAccel._lay = lerp(computeControlAccel._lay, ay, lagBlend);
+
+  return { ax: computeControlAccel._lax, ay: computeControlAccel._lay };
+}
+
 
   // -------------------------
   // Collision / progress
@@ -669,8 +700,9 @@
       player.vy += ay * dt;
 
       const drag = Math.exp(-player.drag * dt);
-      player.vx *= drag;
-      player.vy *= drag;
+player.vx *= drag;
+player.vy *= drag;
+
 
       const sp = Math.hypot(player.vx, player.vy);
       if (sp > player.maxSpeed) {
@@ -737,13 +769,14 @@
   // -------------------------
   // Input listeners
   // -------------------------
-  window.addEventListener("mousemove", (e) => {
-    // ✅ Ignore mouse input when menu is up or countdown is active
-    if (!state.inputEnabled) return;
-    state.mouse.x = e.clientX;
-    state.mouse.y = e.clientY;
-    state.mouse.movedAt = performance.now();
-  });
+window.addEventListener("mousemove", (e) => {
+  // still ignore during menu/countdown to prevent interference
+  if (!state.inputEnabled) return;
+
+  state.mouse.rawX = e.clientX;
+  state.mouse.rawY = e.clientY;
+  state.mouse.movedAt = performance.now();
+});
 
   window.addEventListener("keydown", (e) => {
     // Always allow M + Escape while menu is up (quality-of-life)
