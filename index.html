@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Wire Loop From Hell</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <canvas id="game"></canvas>
+
+  <div class="hud">
+    <div class="row">
+      <div><span class="label">Time:</span> <span id="time">0.00</span>s</div>
+      <div><span class="label">Strikes:</span> <span id="strikes">0</span>/<span id="maxStrikes">3</span></div>
+      <div><span class="label">Mode:</span> <span id="mode">Mouse</span></div>
+    </div>
+
+    <div class="row">
+      <div class="pill" id="eventPill">No sabotage… yet.</div>
+      <div class="pill danger" id="recatchPill" style="display:none;">RECATCH!</div>
+    </div>
+
+    <div class="row small" id="tip">
+      Move the ring without “touching” the wire. Controls are intentionally awful. Good luck.
+    </div>
+  </div>
+
+  <div class="overlay" id="overlay">
+    <div class="panel">
+      <h1>WIRE LOOP FROM HELL</h1>
+      <p>
+        Keep the wire inside the ring’s hole. If you drift too far from the wire: <b>BUZZ</b>.
+      </p>
+      <ul>
+        <li><b>Mouse:</b> Ring chases your cursor… badly (lag + wobble).</li>
+        <li><b>Keyboard:</b> WASD/Arrow keys (also badly).</li>
+        <li><b>Rare:</b> Wire morphs. You won’t instantly lose—get back on it during <b>RECATCH</b>.</li>
+      </ul>
+
+      <div class="controls">
+        <button id="startBtn">Start</button>
+        <button id="resetBtn" class="ghost">Reset</button>
+      </div>
+
+      <p class="small">
+        Tip: You can switch control mode anytime:
+        <b>M</b> toggles Mouse/Keyboard.
+      </p>
+    </div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <script src="game.js"></script>
+</body>
+</html>
