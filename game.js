@@ -25,9 +25,16 @@
     return dx * dx + dy * dy;
   };
 
-  function setPointerTarget(clientX, clientY) {
+function setPointerTarget(clientX, clientY) {
   state.mouse.rawX = clientX;
   state.mouse.rawY = clientY;
+
+  // ✅ Keep smoothed target in sync even when inputEnabled is false (countdown/menu)
+  if (!state.inputEnabled) {
+    state.mouse.x = clientX;
+    state.mouse.y = clientY;
+  }
+
   state.mouse.movedAt = performance.now();
 }
 
