@@ -7,12 +7,6 @@
   --danger: #ff6b6b;
   --good: #3cff9a;
   --wire: rgba(240, 240, 255, 0.85);
-
-  --sat: env(safe-area-inset-top);
-  --sab: env(safe-area-inset-bottom);
-  --sal: env(safe-area-inset-left);
-  --sar: env(safe-area-inset-right);
-
 }
 
 * { box-sizing: border-box; }
@@ -31,19 +25,17 @@ html, body {
   position: fixed;
   inset: 0;
   width: 100vw;
+  height: 100vh;
 
-  height: 100svh;
-  height: 100dvh;
-  height: 100vh; /* fallback */
-
-  touch-action: none;
+  /* ✅ Mobile support */
+  touch-action: none; /* stops scroll/zoom gestures from hijacking the game */
 }
 
 .hud {
   position: fixed;
-  top: calc(12px + env(safe-area-inset-top));
-  left: calc(12px + env(safe-area-inset-left));
-  right: calc(12px + env(safe-area-inset-right));
+  top: 12px;
+  left: 12px;
+  right: 12px;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -142,7 +134,7 @@ button.ghost {
 
 .toast {
   position: fixed;
-  bottom: calc(16px + env(safe-area-inset-bottom));
+  bottom: 16px;
   left: 50%;
   transform: translateX(-50%);
   background: rgba(0,0,0,0.55);
@@ -162,9 +154,3 @@ body {
   -webkit-user-select: none;
 }
 
-@media (max-width: 520px) {
-  .hud { gap: 6px; }
-  .hud .row { gap: 8px; }
-  .pill { padding: 6px 10px; font-size: 13px; }
-  #tip { display: none; }
-}

@@ -25,29 +25,6 @@
     return dx * dx + dy * dy;
   };
 
-function setPointerTarget(clientX, clientY) {
-  state.mouse.rawX = clientX;
-  state.mouse.rawY = clientY;
-
-  // ✅ Keep smoothed target in sync even when inputEnabled is false (countdown/menu)
-  if (!state.inputEnabled) {
-    state.mouse.x = clientX;
-    state.mouse.y = clientY;
-  }
-
-  state.mouse.movedAt = performance.now();
-}
-
-function getSafeAreaPx() {
-  // read CSS env(safe-area-*) via computed style on :root
-  const cs = getComputedStyle(document.documentElement);
-  const top = parseFloat(cs.getPropertyValue("--sat")) || 0;
-  const bottom = parseFloat(cs.getPropertyValue("--sab")) || 0;
-  const left = parseFloat(cs.getPropertyValue("--sal")) || 0;
-  const right = parseFloat(cs.getPropertyValue("--sar")) || 0;
-  return { top, bottom, left, right };
-}
-
   function showToast(msg, ms = 900) {
     ui.toast.textContent = msg;
     ui.toast.classList.add("show");
@@ -90,6 +67,7 @@ function getSafeAreaPx() {
     return { cx, cy, t, d2: dist2(px, py, cx, cy) };
   }
 
+  // Catmull-Rom (desktop only; mobile uses linear to avoid spline loops)
   function catmullRom(p0, p1, p2, p3, t) {
     const t2 = t * t;
     const t3 = t2 * t;
@@ -119,9 +97,12 @@ function getSafeAreaPx() {
     won: false,
     over: false,
 
+    // playfield rectangle (keeps the wire out of the HUD area)
     play: { x: 0, y: 0, w: 0, h: 0 },
     uiScale: 1,
 
+    // device profile
+    device: { kind: "desktop", isMobile: false },
 
     startAt: 0,
     now: 0,
@@ -131,19 +112,28 @@ function getSafeAreaPx() {
 
     controlMode: "mouse", // "mouse" or "keys"
     keys: new Set(),
-   mouse: {
-  x: 0, y: 0,           // smoothed
-  rawX: 0, rawY: 0,     // raw cursor
-  movedAt: 0
-},
 
-pointer: {
-  active: false,
-  id: null,
-  type: "mouse" // "touch" | "pen" | "mouse"
-},
+    mouse: {
+      x: 0, y: 0,           // smoothed
+      rawX: 0, rawY: 0,     // raw cursor/target
+      movedAt: 0
+    },
 
+    pointer: {
+      active: false,
+      id: null,
+      type: "mouse" // "touch" | "pen" | "mouse"
+    },
 
+    // Touch-relative steering (feels way better on phones)
+    touch: {
+      relative: true,   // auto enabled for touch/pen
+      originX: 0, originY: 0,   // where finger first touched
+      anchorX: 0, anchorY: 0,   // ring position at touch start (target anchor)
+      maxRadius: 230,           // pixels, scaled by uiScale
+      gain: 1.25,               // sensitivity multiplier
+      deadzone: 6               // pixels, scaled by uiScale
+    },
 
     sabotageText: "No sabotage… yet.",
     sabotageUntil: 0,
@@ -166,35 +156,31 @@ pointer: {
     wireCumLen: [],
     wireTotalLen: 1,
 
-    // ✅ NEW: input gating + countdown
+    // input gating + countdown
     inputEnabled: false,
-    countdownUntil: 0,     // performance.now() timestamp
+    countdownUntil: 0,
     countdownSeconds: 5
   };
 
   const player = {
-  x: 0,
-  y: 0,
-  vx: 0,
-  vy: 0,
+    x: 0, y: 0,
+    vx: 0, vy: 0,
 
-  outerR: 20,
-  innerR: 13,
+    outerR: 20,
+    innerR: 13,
 
-  // Fairer mouse feel (still hard overall)
-  maxSpeed: 650,      // slightly lower top speed
-  drag: 4.2,          // more friction = less skating
-  lag: 0.06,          // more responsive
+    // base tuning (device profile adjusts these)
+    maxSpeed: 650,
+    drag: 4.2,
+    lag: 0.06,
 
-  // Mouse steering tuning
-  mouseSmooth: 0.16,  // 0..1 (higher = more immediate, lower = smoother)
-  arriveRadius: 120,  // slows down when close to cursor
-  steering: 14.0,     // how strongly velocity snaps toward desired velocity
+    mouseSmooth: 0.16,
+    arriveRadius: 120,
+    steering: 14.0,
 
-  // Keyboard still can have some chaos
-  accelKeys: 1200,
-  jitterKeys: 70
-};
+    accelKeys: 1200,
+    jitterKeys: 70
+  };
 
   const wire = {
     base: [],
@@ -207,16 +193,123 @@ pointer: {
     slitherPhase: 0
   };
 
+  // -------------------------
+  // Device profile
+  // -------------------------
+  function detectDeviceKind() {
+    // Prefer capability detection over UA.
+    const coarse = window.matchMedia && window.matchMedia("(pointer: coarse)").matches;
+    const small = Math.min(state.w || window.innerWidth, state.h || window.innerHeight) <= 700;
+    const mobile = coarse || small;
+    return mobile ? "mobile" : "desktop";
+  }
+
+  function applyDeviceTuning(kind) {
+    const mobile = (kind === "mobile");
+    state.device.kind = kind;
+    state.device.isMobile = mobile;
+
+    if (mobile) {
+      // more stable + slightly slower (still hard)
+      player.maxSpeed = 540;
+      player.arriveRadius = 175;
+      player.steering = 12.2;
+      player.mouseSmooth = 0.20;
+      player.drag = 4.9;
+      player.lag = 0.05;
+
+      player.accelKeys = 1050;
+      player.jitterKeys = 55;
+
+      // touch relative tuning scales with uiScale later
+      state.touch.maxRadius = 250;
+      state.touch.gain = 1.30;
+      state.touch.deadzone = 7;
+    } else {
+      player.maxSpeed = 650;
+      player.arriveRadius = 120;
+      player.steering = 14.0;
+      player.mouseSmooth = 0.16;
+      player.drag = 4.2;
+      player.lag = 0.06;
+
+      player.accelKeys = 1200;
+      player.jitterKeys = 70;
+
+      state.touch.maxRadius = 230;
+      state.touch.gain = 1.25;
+      state.touch.deadzone = 6;
+    }
+  }
+
+  // -------------------------
+  // Coordinate mapping
+  // -------------------------
   function normToPx(p) {
-  // Map normalized coords into the playfield rect
-  return {
-    x: state.play.x + p.x * state.play.w,
-    y: state.play.y + p.y * state.play.h
-  };
-}
+    return {
+      x: state.play.x + p.x * state.play.w,
+      y: state.play.y + p.y * state.play.h
+    };
+  }
 
+  function pxToPlayClamped(x, y) {
+    const pad = 10 * (state.uiScale || 1);
+    return {
+      x: clamp(x, state.play.x + pad, state.play.x + state.play.w - pad),
+      y: clamp(y, state.play.y + pad, state.play.y + state.play.h - pad),
+    };
+  }
 
-  function makeHellWire(seed = 1337) {
+  // -------------------------
+  // Mobile wire: monotone-x curve (no self-crossings)
+  // -------------------------
+  function makeHellWireMobile(seed = 7331) {
+    let s = seed >>> 0;
+    const rnd = () => (s = (s * 1664525 + 1013904223) >>> 0) / 4294967296;
+
+    const pts = [];
+    const x0 = 0.05, x1 = 0.95;
+    const n = 85; // shorter course
+
+    // smooth noise (keeps it curvy but not insane)
+    let y = 0.55;
+    let vy = 0;
+
+    for (let i = 0; i < n; i++) {
+      const x = lerp(x0, x1, i / (n - 1));
+
+      // random acceleration with damping
+      const acc = (rnd() - 0.5) * 0.09;
+      vy = (vy + acc) * 0.72;
+      y += vy;
+
+      // occasional spike/dip (still monotone-x, so no self-cross)
+      if (i % 17 === 0 && i > 0 && i < n - 1) {
+        y += (rnd() < 0.5 ? -1 : 1) * (0.10 + rnd() * 0.10);
+      }
+
+      y = clamp(y, 0.06, 0.94);
+      pts.push({ x, y });
+    }
+
+    // Add 1–2 "tight knots" without crossings: local wiggles in y only
+    const knots = [Math.floor(n * 0.35), Math.floor(n * 0.62)];
+    for (const k of knots) {
+      if (k < 3 || k > n - 4) continue;
+      const base = pts[k].y;
+      pts[k - 1].y = clamp(base + (rnd() - 0.5) * 0.18, 0.06, 0.94);
+      pts[k].y = clamp(base + (rnd() - 0.5) * 0.20, 0.06, 0.94);
+      pts[k + 1].y = clamp(base + (rnd() - 0.5) * 0.18, 0.06, 0.94);
+    }
+
+    // Ensure endpoints are nice
+    pts[0].y = clamp(pts[0].y, 0.30, 0.75);
+    pts[n - 1].y = clamp(pts[n - 1].y, 0.30, 0.75);
+    return pts;
+  }
+
+  // Desktop wire: gnarly + loops allowed
+  function makeHellWireDesktop(seed = 1337) {
     let s = seed >>> 0;
     const rnd = () => (s = (s * 1664525 + 1013904223) >>> 0) / 4294967296;
 
@@ -234,13 +327,14 @@ pointer: {
       x = clamp(x + dx, 0.02, 0.98);
       y = clamp(y + dy, 0.02, 0.98);
 
-     if (i % 19 === 0) {
-  y = clamp(y + (rnd() < 0.5 ? -1 : 1) * (0.18 + rnd() * 0.22), 0.02, 0.98);
-}
+      if (i % 19 === 0) {
+        y = clamp(y + (rnd() < 0.5 ? -1 : 1) * (0.18 + rnd() * 0.22), 0.02, 0.98);
+      }
       pts.push({ x, y });
     }
     pts[pts.length - 1] = { x: 0.97, y: 0.52 };
 
+    // gnarly loops
     const injectAt = [32, 64, 101];
     for (const idx of injectAt) {
       if (idx <= 2 || idx >= pts.length - 3) continue;
@@ -251,8 +345,8 @@ pointer: {
       for (let k = 0; k < steps; k++) {
         const a = (k / steps) * Math.PI * 2.0;
         loop.push({
-          x: clamp(c.x + Math.cos(a) * r * (0.7 + rnd() * 0.7), 0.06, 0.94),
-          y: clamp(c.y + Math.sin(a) * r * (0.7 + rnd() * 0.7), 0.08, 0.92),
+          x: clamp(c.x + Math.cos(a) * r * (0.7 + rnd() * 0.7), 0.02, 0.98),
+          y: clamp(c.y + Math.sin(a) * r * (0.7 + rnd() * 0.7), 0.02, 0.98),
         });
       }
       pts.splice(idx, 0, ...loop);
@@ -260,23 +354,54 @@ pointer: {
     return pts;
   }
 
+  function buildWireForDevice(kind) {
+    const pts = (kind === "mobile") ? makeHellWireMobile(7331) : makeHellWireDesktop(1337);
+
+    wire.base = pts;
+    wire.curr = pts.map(p => ({ ...p }));
+    wire.morphing = false;
+
+    state.recatchUntil = 0;
+    state.inRecatch = false;
+    ui.recatchPill.style.display = "none";
+
+    rebuildWireSamples();
+    startPosition();
+  }
+
+  // -------------------------
+  // Sampling (mobile linear, desktop spline)
+  // -------------------------
   function rebuildWireSamples() {
     const cps = wire.curr;
     const samples = [];
     const cum = [0];
-    const segSamples = 10;
 
-    for (let i = 0; i < cps.length - 1; i++) {
-      const p0 = cps[Math.max(0, i - 1)];
-      const p1 = cps[i];
-      const p2 = cps[i + 1];
-      const p3 = cps[Math.min(cps.length - 1, i + 2)];
-      for (let j = 0; j < segSamples; j++) {
-        const t = j / segSamples;
-        samples.push(catmullRom(p0, p1, p2, p3, t));
+    if (state.device.isMobile) {
+      // Linear interpolation (prevents Catmull-Rom overshoot loops)
+      const segSamples = 14; // smoother line on phones
+      for (let i = 0; i < cps.length - 1; i++) {
+        const a = cps[i], b = cps[i + 1];
+        for (let j = 0; j < segSamples; j++) {
+          const t = j / segSamples;
+          samples.push({ x: lerp(a.x, b.x, t), y: lerp(a.y, b.y, t) });
+        }
       }
+      samples.push(cps[cps.length - 1]);
+    } else {
+      const segSamples = 10;
+      for (let i = 0; i < cps.length - 1; i++) {
+        const p0 = cps[Math.max(0, i - 1)];
+        const p1 = cps[i];
+        const p2 = cps[i + 1];
+        const p3 = cps[Math.min(cps.length - 1, i + 2)];
+        for (let j = 0; j < segSamples; j++) {
+          const t = j / segSamples;
+          samples.push(catmullRom(p0, p1, p2, p3, t));
+        }
+      }
+      samples.push(cps[cps.length - 1]);
     }
-    samples.push(cps[cps.length - 1]);
 
     const px = samples.map(normToPx);
     let total = 0;
@@ -297,63 +422,77 @@ pointer: {
     player.vx = 0;
     player.vy = 0;
     state.bestProgress = 0;
+
+    // reset targets to ring so we never jump
+    state.mouse.rawX = player.x;
+    state.mouse.rawY = player.y;
+    state.mouse.x = player.x;
+    state.mouse.y = player.y;
+    state.mouse.movedAt = performance.now();
   }
 
-function resize() {
-  const dpr = Math.max(1, window.devicePixelRatio || 1);
+  // -------------------------
+  // Layout / resize
+  // -------------------------
+  function resize() {
+    const dpr = Math.max(1, window.devicePixelRatio || 1);
+    const vv = window.visualViewport;
 
-  const vv = window.visualViewport;
-  state.w = Math.round(vv ? vv.width : window.innerWidth);
-  state.h = Math.round(vv ? vv.height : window.innerHeight);
+    state.w = Math.round(vv ? vv.width : window.innerWidth);
+    state.h = Math.round(vv ? vv.height : window.innerHeight);
 
-  canvas.width = Math.floor(state.w * dpr);
-  canvas.height = Math.floor(state.h * dpr);
-  canvas.style.width = state.w + "px";
-  canvas.style.height = state.h + "px";
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    canvas.width = Math.floor(state.w * dpr);
+    canvas.height = Math.floor(state.h * dpr);
+    canvas.style.width = state.w + "px";
+    canvas.style.height = state.h + "px";
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-  // UI scaling for mobile
-state.uiScale = clamp(Math.min(state.w, state.h) / 520, 1.0, 1.45);
+    // Scale up on small screens so the wire doesn't look tiny
+    state.uiScale = clamp(Math.min(state.w, state.h) / 520, 1.0, 1.45);
 
-// Measure the HUD so we don't guess padding
-const hudEl = document.querySelector(".hud");
-const hudRect = hudEl ? hudEl.getBoundingClientRect() : { bottom: 0 };
+    // Measure the HUD so we don't guess padding
+    const hudEl = document.querySelector(".hud");
+    const hudRect = hudEl ? hudEl.getBoundingClientRect() : { bottom: 0 };
 
-const sidePad = 10 * state.uiScale;
-const topPad = hudRect.bottom + (10 * state.uiScale);
-const bottomPad = 18 * state.uiScale;
+    const sidePad = 10 * state.uiScale;
+    const topPad = hudRect.bottom + (10 * state.uiScale);
+    const bottomPad = 18 * state.uiScale;
 
-state.play.x = sidePad;
-state.play.y = topPad;
-state.play.w = Math.max(1, state.w - sidePad * 2);
-state.play.h = Math.max(1, state.h - topPad - bottomPad);
+    state.play.x = sidePad;
+    state.play.y = topPad;
+    state.play.w = Math.max(1, state.w - sidePad * 2);
+    state.play.h = Math.max(1, state.h - topPad - bottomPad);
 
+    // ring scales with UI
+    player.outerR = 20 * state.uiScale;
+    player.innerR = 13 * state.uiScale;
 
-// Scale ring with UI scale
-player.outerR = 20 * state.uiScale;
-player.innerR = 13 * state.uiScale;
+    // device detection + wire profile swap
+    const kind = detectDeviceKind();
+    const changed = (kind !== state.device.kind);
+    applyDeviceTuning(kind);
 
-  rebuildWireSamples();
-  if (!state.running) startPosition();
-}
+    if (changed || wire.curr.length === 0) {
+      buildWireForDevice(kind);
+    } else {
+      rebuildWireSamples();
+      if (!state.running) startPosition();
+    }
+  }
 
   // -------------------------
-  // ✅ Input gating
+  // Input gating + countdown
   // -------------------------
   function setInputEnabled(on) {
     state.inputEnabled = on;
     if (!on) {
-      // Clear any “stuck” inputs so nothing carries over from the menu
       state.keys.clear();
-      // Reset mouse target to ring position so it doesn't jump
-      // Reset mouse targets to ring position so it never jumps
-state.mouse.rawX = player.x;
-state.mouse.rawY = player.y;
-state.mouse.x = player.x;
-state.mouse.y = player.y;
-state.mouse.movedAt = performance.now();
-
-      // Also kill motion
+      // freeze target to ring
+      state.mouse.rawX = player.x;
+      state.mouse.rawY = player.y;
+      state.mouse.x = player.x;
+      state.mouse.y = player.y;
+      state.mouse.movedAt = performance.now();
       player.vx = 0;
       player.vy = 0;
     }
@@ -369,12 +508,17 @@ state.mouse.movedAt = performance.now();
   // Sabotage / Morphing
   // -------------------------
   function scheduleNextSabotage(t) {
-    const dt = 8000 + Math.random() * 6500; // slightly less frequent now
-    state.nextSabotageAt = t + dt;
+    const mobile = state.device.isMobile;
+    const base = mobile ? 11000 : 8000;
+    const jitter = mobile ? 9000 : 6500;
+    state.nextSabotageAt = t + base + Math.random() * jitter;
   }
+
   function scheduleNextMorph(t) {
-    const dt = 24000 + Math.random() * 22000;
-    state.nextMorphAt = t + dt;
+    const mobile = state.device.isMobile;
+    const base = mobile ? 32000 : 24000;
+    const jitter = mobile ? 28000 : 22000;
+    state.nextMorphAt = t + base + Math.random() * jitter;
   }
 
   function triggerSabotage(t) {
@@ -411,12 +555,20 @@ state.mouse.movedAt = performance.now();
     wire.from = wire.curr.map(p => ({ ...p }));
     wire.to = wire.curr.map(p => ({ ...p }));
 
-    const k = 6 + Math.floor(Math.random() * 7);
+    const mobile = state.device.isMobile;
+    const k = mobile ? (3 + Math.floor(Math.random() * 3)) : (6 + Math.floor(Math.random() * 7));
+
     for (let i = 0; i < k; i++) {
       const idx = 2 + Math.floor(Math.random() * (wire.to.length - 4));
       const p = wire.to[idx];
-      p.x = clamp(p.x + (Math.random() - 0.5) * 0.14, 0.06, 0.94);
-      p.y = clamp(p.y + (Math.random() - 0.5) * 0.18, 0.08, 0.92);
+
+      if (mobile) {
+        // Mobile: adjust Y only to keep monotone-x shape (prevents crossings)
+        p.y = clamp(p.y + (Math.random() - 0.5) * 0.18, 0.06, 0.94);
+      } else {
+        p.x = clamp(p.x + (Math.random() - 0.5) * 0.14, 0.02, 0.98);
+        p.y = clamp(p.y + (Math.random() - 0.5) * 0.18, 0.02, 0.98);
+      }
     }
 
     state.recatchUntil = t + 1600;
@@ -444,105 +596,150 @@ state.mouse.movedAt = performance.now();
   // -------------------------
   // Controls
   // -------------------------
-function computeControlAccel(dt, t) {
-  if (!state.inputEnabled) return { ax: 0, ay: 0 };
+  function setPointerTargetFromClient(clientX, clientY) {
+    // Desktop mouse = absolute target.
+    // Touch/pen = relative joystick-like target (more usable; doesn't require perfect finger steadiness).
+    const isTouchLike = (state.pointer.type === "touch" || state.pointer.type === "pen");
+    const useRelative = isTouchLike && state.touch.relative;
 
-  const mode = state.controlMode === "mouse" ? "mouse" : "keys";
+    if (!useRelative) {
+      state.mouse.rawX = clientX;
+      state.mouse.rawY = clientY;
 
-  // HUD label: show Touch/Pen/Mouse when in mouse-mode
-  if (mode === "keys") {
-    ui.mode.textContent = "Keyboard";
-  } else {
-    const p = state.pointer.type;
-    ui.mode.textContent = (p === "touch") ? "Touch" : (p === "pen") ? "Pen" : "Mouse";
+      // allow pre-aim during countdown
+      if (!state.inputEnabled) {
+        state.mouse.x = clientX;
+        state.mouse.y = clientY;
+      }
+      state.mouse.movedAt = performance.now();
+      return;
+    }
+
+    const sUI = state.uiScale || 1;
+    const maxR = state.touch.maxRadius * sUI;
+    const dead = state.touch.deadzone * sUI;
+    const gain = state.touch.gain;
+
+    let dx = (clientX - state.touch.originX);
+    let dy = (clientY - state.touch.originY);
+
+    const mag = Math.hypot(dx, dy);
+    if (mag < dead) {
+      dx = 0; dy = 0;
+    } else if (mag > maxR) {
+      const k = maxR / mag;
+      dx *= k; dy *= k;
+    }
+
+    // target is anchor + joystick delta
+    const tx = state.touch.anchorX + dx * gain;
+    const ty = state.touch.anchorY + dy * gain;
+
+    const cl = pxToPlayClamped(tx, ty);
+    state.mouse.rawX = cl.x;
+    state.mouse.rawY = cl.y;
+
+    // pre-aim during countdown: keep smoothed in sync
+    if (!state.inputEnabled) {
+      state.mouse.x = state.mouse.rawX;
+      state.mouse.y = state.mouse.rawY;
+    }
+
+    state.mouse.movedAt = performance.now();
   }
 
+  function computeControlAccel(dt, t) {
+    if (!state.inputEnabled) return { ax: 0, ay: 0 };
 
-  let ax = 0, ay = 0;
+    const mode = state.controlMode === "mouse" ? "mouse" : "keys";
 
-  if (mode === "mouse") {
-    // Smooth raw cursor -> stable target
-    const s = 1 - Math.exp(-dt / player.mouseSmooth);
-    state.mouse.x = lerp(state.mouse.x, state.mouse.rawX, s);
-    state.mouse.y = lerp(state.mouse.y, state.mouse.rawY, s);
-
-    const dx = state.mouse.x - player.x;
-    const dy = state.mouse.y - player.y;
-    const dist = Math.hypot(dx, dy) || 1;
-
-    // Desired speed ramps up with distance, slows when close (arrive behavior)
-    const ramp = clamp(dist / player.arriveRadius, 0, 1);
-    const desiredSpeed = player.maxSpeed * ramp;
-
-    const desiredVx = (dx / dist) * desiredSpeed;
-    const desiredVy = (dy / dist) * desiredSpeed;
-
-    // Steering: accelerate to match desired velocity (very stable & fair)
-    ax = (desiredVx - player.vx) * player.steering;
-    ay = (desiredVy - player.vy) * player.steering;
-
-    // Sabotage effects can still mess you up (but only when active)
-    if (t < state.invertUntil) { ax *= -1; ay *= -1; }
-
-    if (t < state.windUntil) {
-      const w = t * 0.002;
-      ax += Math.sin(w) * 650;
-      ay += Math.cos(w * 1.3) * 650;
+    if (mode === "keys") {
+      ui.mode.textContent = "Keyboard";
+    } else {
+      const p = state.pointer.type;
+      ui.mode.textContent = (p === "touch") ? "Touch" : (p === "pen") ? "Pen" : "Mouse";
     }
 
-    if (t < state.wobbleUntil) {
-      const w = t * 0.01;
-      ax += Math.sin(w * 2.7) * 900;
-      ay += Math.cos(w * 2.2) * 900;
-      state.shake = Math.max(state.shake, 5);
+    let ax = 0, ay = 0;
+
+    if (mode === "mouse") {
+      // Smooth target to avoid jitter
+      const s = 1 - Math.exp(-dt / player.mouseSmooth);
+      state.mouse.x = lerp(state.mouse.x, state.mouse.rawX, s);
+      state.mouse.y = lerp(state.mouse.y, state.mouse.rawY, s);
+
+      const dx = state.mouse.x - player.x;
+      const dy = state.mouse.y - player.y;
+      const dist = Math.hypot(dx, dy) || 1;
+
+      // Desired speed ramps up with distance (arrive)
+      const ramp = clamp(dist / player.arriveRadius, 0, 1);
+      const desiredSpeed = player.maxSpeed * ramp;
+
+      const desiredVx = (dx / dist) * desiredSpeed;
+      const desiredVy = (dy / dist) * desiredSpeed;
+
+      ax = (desiredVx - player.vx) * player.steering;
+      ay = (desiredVy - player.vy) * player.steering;
+
+      // sabotage effects
+      if (t < state.invertUntil) { ax *= -1; ay *= -1; }
+
+      if (t < state.windUntil) {
+        const w = t * 0.002;
+        ax += Math.sin(w) * 650;
+        ay += Math.cos(w * 1.3) * 650;
+      }
+
+      if (t < state.wobbleUntil) {
+        const w = t * 0.01;
+        ax += Math.sin(w * 2.7) * 900;
+        ay += Math.cos(w * 2.2) * 900;
+        state.shake = Math.max(state.shake, 5);
+      }
+
+    } else {
+      // Keyboard
+      const up = state.keys.has("ArrowUp") || state.keys.has("KeyW");
+      const down = state.keys.has("ArrowDown") || state.keys.has("KeyS");
+      const left = state.keys.has("ArrowLeft") || state.keys.has("KeyA");
+      const right = state.keys.has("ArrowRight") || state.keys.has("KeyD");
+
+      let ix = (right ? 1 : 0) - (left ? 1 : 0);
+      let iy = (down ? 1 : 0) - (up ? 1 : 0);
+
+      const len = Math.hypot(ix, iy) || 1;
+      ix /= len; iy /= len;
+
+      ax += ix * player.accelKeys;
+      ay += iy * player.accelKeys;
+
+      ax += (Math.random() - 0.5) * player.jitterKeys;
+      ay += (Math.random() - 0.5) * player.jitterKeys;
+
+      if (t < state.invertUntil) { ax *= -1; ay *= -1; }
+      if (t < state.windUntil) {
+        const w = t * 0.002;
+        ax += Math.sin(w) * 650;
+        ay += Math.cos(w * 1.3) * 650;
+      }
+      if (t < state.wobbleUntil) {
+        const w = t * 0.01;
+        ax += Math.sin(w * 2.7) * 900;
+        ay += Math.cos(w * 2.2) * 900;
+        state.shake = Math.max(state.shake, 5);
+      }
     }
 
-    // NOTE: no baseline jitter/wobble in mouse mode anymore (fixes “steadiness” complaints)
+    // lag smoothing
+    computeControlAccel._lax ??= 0;
+    computeControlAccel._lay ??= 0;
+    const lagBlend = 1 - Math.exp(-dt / player.lag);
+    computeControlAccel._lax = lerp(computeControlAccel._lax, ax, lagBlend);
+    computeControlAccel._lay = lerp(computeControlAccel._lay, ay, lagBlend);
 
-  } else {
-    // Keyboard: still challenging, but not ridiculous
-    const up = state.keys.has("ArrowUp") || state.keys.has("KeyW");
-    const down = state.keys.has("ArrowDown") || state.keys.has("KeyS");
-    const left = state.keys.has("ArrowLeft") || state.keys.has("KeyA");
-    const right = state.keys.has("ArrowRight") || state.keys.has("KeyD");
-
-    let ix = (right ? 1 : 0) - (left ? 1 : 0);
-    let iy = (down ? 1 : 0) - (up ? 1 : 0);
-
-    const len = Math.hypot(ix, iy) || 1;
-    ix /= len; iy /= len;
-
-    ax += ix * player.accelKeys;
-    ay += iy * player.accelKeys;
-
-    // small tremor only for keys
-    ax += (Math.random() - 0.5) * player.jitterKeys;
-    ay += (Math.random() - 0.5) * player.jitterKeys;
-
-    if (t < state.invertUntil) { ax *= -1; ay *= -1; }
-    if (t < state.windUntil) {
-      const w = t * 0.002;
-      ax += Math.sin(w) * 650;
-      ay += Math.cos(w * 1.3) * 650;
-    }
-    if (t < state.wobbleUntil) {
-      const w = t * 0.01;
-      ax += Math.sin(w * 2.7) * 900;
-      ay += Math.cos(w * 2.2) * 900;
-      state.shake = Math.max(state.shake, 5);
-    }
+    return { ax: computeControlAccel._lax, ay: computeControlAccel._lay };
   }
-
-  // Slight lag smoothing (helps both modes)
-  computeControlAccel._lax ??= 0;
-  computeControlAccel._lay ??= 0;
-  const lagBlend = 1 - Math.exp(-dt / player.lag);
-  computeControlAccel._lax = lerp(computeControlAccel._lax, ax, lagBlend);
-  computeControlAccel._lay = lerp(computeControlAccel._lay, ay, lagBlend);
-
-  return { ax: computeControlAccel._lax, ay: computeControlAccel._lay };
-}
-
 
   // -------------------------
   // Collision / progress
@@ -619,12 +816,14 @@ function computeControlAccel(dt, t) {
   // -------------------------
   function drawWire() {
     const s = state.wireSamples;
+    const sUI = state.uiScale || 1;
 
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
 
-    wire.slitherPhase += 0.015;
-    const sl = Math.sin(wire.slitherPhase) * 0.9;
+    // subtle slither (less on mobile)
+    wire.slitherPhase += state.device.isMobile ? 0.012 : 0.015;
+    const sl = Math.sin(wire.slitherPhase) * (state.device.isMobile ? 0.65 : 0.9);
 
     ctx.beginPath();
     for (let i = 0; i < s.length; i++) {
@@ -634,15 +833,13 @@ function computeControlAccel(dt, t) {
       else ctx.lineTo(p.x, y);
     }
 
-  const sUI = state.uiScale || 1;
+    ctx.strokeStyle = "rgba(240,240,255,0.22)";
+    ctx.lineWidth = 20 * sUI;
+    ctx.stroke();
 
-ctx.strokeStyle = "rgba(240,240,255,0.22)";
-ctx.lineWidth = 20 * sUI;
-ctx.stroke();
-
-ctx.strokeStyle = "rgba(240,240,255,0.65)";
-ctx.lineWidth = 8 * sUI;
-ctx.stroke();
+    ctx.strokeStyle = "rgba(240,240,255,0.65)";
+    ctx.lineWidth = 8 * sUI;
+    ctx.stroke();
 
     const start = normToPx(wire.curr[0]);
     const end = normToPx(wire.curr[wire.curr.length - 1]);
@@ -653,7 +850,7 @@ ctx.stroke();
     ctx.fill();
 
     ctx.beginPath();
-ctx.arc(end.x, end.y, 12 * sUI, 0, Math.PI * 2);
+    ctx.arc(end.x, end.y, 12 * sUI, 0, Math.PI * 2);
     ctx.fillStyle = "rgba(255,107,107,0.9)";
     ctx.fill();
   }
@@ -699,7 +896,6 @@ ctx.arc(end.x, end.y, 12 * sUI, 0, Math.PI * 2);
     if (clearAndCamera._restore) ctx.restore();
   }
 
-  // Draw countdown as big text in the middle
   function drawCountdown(t) {
     if (!state.countdownUntil || t >= state.countdownUntil) return;
 
@@ -707,16 +903,19 @@ ctx.arc(end.x, end.y, 12 * sUI, 0, Math.PI * 2);
     const secLeft = Math.ceil(msLeft / 1000);
     ui.eventPill.textContent = `Get ready… ${secLeft}`;
 
+    const cx = state.play.x + state.play.w / 2;
+    const cy = state.play.y + state.play.h / 2;
+
     ctx.save();
     ctx.globalAlpha = 0.9;
-    ctx.font = "700 64px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial";
+    ctx.font = `700 ${64 * (state.uiScale || 1)}px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial`;
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
     ctx.fillStyle = "rgba(233,238,252,0.9)";
-    ctx.fillText(String(secLeft), state.w / 2, state.h / 2);
-    ctx.font = "600 18px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial";
+    ctx.fillText(String(secLeft), cx, cy);
+    ctx.font = `600 ${18 * (state.uiScale || 1)}px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial`;
     ctx.fillStyle = "rgba(233,238,252,0.7)";
-    ctx.fillText("Controls enable at 0. Don’t touch anything. (Just kidding.)", state.w / 2, state.h / 2 + 58);
+    ctx.fillText("Controls enable at 0. Don’t touch anything. (Just kidding.)", cx, cy + 58 * (state.uiScale || 1));
     ctx.restore();
   }
 
@@ -730,7 +929,6 @@ ctx.arc(end.x, end.y, 12 * sUI, 0, Math.PI * 2);
     lastT = t;
     state.now = t;
 
-    // Update morph + rebuild samples
     updateMorph(t);
     rebuildWireSamples();
 
@@ -739,7 +937,7 @@ ctx.arc(end.x, end.y, 12 * sUI, 0, Math.PI * 2);
       if (t >= state.countdownUntil) {
         state.countdownUntil = 0;
         setInputEnabled(true);
-        state.startAt = performance.now(); // start timer when controls go live
+        state.startAt = performance.now();
         showToast("GO!", 700);
         ui.eventPill.textContent = "No sabotage… yet.";
       }
@@ -751,7 +949,7 @@ ctx.arc(end.x, end.y, 12 * sUI, 0, Math.PI * 2);
       ui.time.textContent = elapsed.toFixed(2);
     }
 
-    // Sabotage/morph triggers only when input is live (prevents chaos during countdown)
+    // Sabotage/morph triggers only when input is live
     if (state.running && state.inputEnabled && t >= state.nextSabotageAt) triggerSabotage(t);
     if (state.running && state.inputEnabled && t >= state.nextMorphAt) triggerMorph(t);
 
@@ -772,9 +970,8 @@ ctx.arc(end.x, end.y, 12 * sUI, 0, Math.PI * 2);
       player.vy += ay * dt;
 
       const drag = Math.exp(-player.drag * dt);
-player.vx *= drag;
-player.vy *= drag;
-
+      player.vx *= drag;
+      player.vy *= drag;
 
       const sp = Math.hypot(player.vx, player.vy);
       if (sp > player.maxSpeed) {
@@ -786,21 +983,18 @@ player.vy *= drag;
       player.x += player.vx * dt;
       player.y += player.vy * dt;
 
-    const pad = 10 * (state.uiScale || 1);
-player.x = clamp(player.x, state.play.x + pad, state.play.x + state.play.w - pad);
-player.y = clamp(player.y, state.play.y + pad, state.play.y + state.play.h - pad);
-
+      // Clamp to playfield
+      const pad = 10 * (state.uiScale || 1);
+      player.x = clamp(player.x, state.play.x + pad, state.play.x + state.play.w - pad);
+      player.y = clamp(player.y, state.play.y + pad, state.play.y + state.play.h - pad);
 
       nearest = nearestOnWire(player.x, player.y);
       const d = Math.sqrt(nearest.d2);
 
       const sUI = state.uiScale || 1;
-
-// keep collision proportional to visuals
-const wireRadius = 3 * sUI;
-const margin = 1.2 * sUI;
-let allowed = player.innerR - wireRadius - margin;
-
+      const wireRadius = 3 * sUI;
+      const margin = 1.2 * sUI;
+      let allowed = player.innerR - wireRadius - margin;
 
       if (t < state.pinchUntil) allowed *= 0.72;
 
@@ -824,7 +1018,7 @@ let allowed = player.innerR - wireRadius - margin;
       state.bestProgress = Math.max(state.bestProgress, prog);
 
       const end = normToPx(wire.curr[wire.curr.length - 1]);
-      const nearEnd = Math.sqrt(dist2(player.x, player.y, end.x, end.y)) < 22;
+      const nearEnd = Math.sqrt(dist2(player.x, player.y, end.x, end.y)) < (22 * sUI);
       const farEnough = state.bestProgress > (state.wireTotalLen * 0.985);
 
       if (nearEnd && farEnough) win();
@@ -834,7 +1028,6 @@ let allowed = player.innerR - wireRadius - margin;
       }
     }
 
-    // Draw
     clearAndCamera();
     drawWire();
     drawRing(nearest);
@@ -845,59 +1038,62 @@ let allowed = player.innerR - wireRadius - margin;
   }
 
   // -------------------------
-  // Input listeners
+  // Input listeners (Pointer Events)
   // -------------------------
-canvas.addEventListener("pointerdown", (e) => {
-  // Allow pointer tracking only when game input is enabled
-  // BUT we still track pointer state even if disabled, so we can prevent scrolling.
-  e.preventDefault();
+  canvas.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
 
-  state.pointer.active = true;
-  state.pointer.id = e.pointerId;
-  state.pointer.type = e.pointerType || "mouse";
+    state.pointer.active = true;
+    state.pointer.id = e.pointerId;
+    state.pointer.type = e.pointerType || "mouse";
 
-  // Capture ensures we keep getting moves even if finger leaves canvas slightly
-  canvas.setPointerCapture?.(e.pointerId);
+    canvas.setPointerCapture?.(e.pointerId);
 
-  // On mobile, touch should behave like "mouse mode"
-  state.controlMode = "mouse";
+    // Touch/pen always uses mouse mode
+    if (state.pointer.type !== "mouse") state.controlMode = "mouse";
 
- setPointerTarget(e.clientX, e.clientY);
-}, { passive: false });
+    // Initialize touch-relative anchor/origin
+    if (state.pointer.type === "touch" || state.pointer.type === "pen") {
+      state.touch.originX = e.clientX;
+      state.touch.originY = e.clientY;
+      state.touch.anchorX = player.x;
+      state.touch.anchorY = player.y;
+    }
 
-canvas.addEventListener("pointermove", (e) => {
-  if (!state.pointer.active) return;
-  if (state.pointer.id !== null && e.pointerId !== state.pointer.id) return;
+    setPointerTargetFromClient(e.clientX, e.clientY);
+  }, { passive: false });
 
-  e.preventDefault();
-setPointerTarget(e.clientX, e.clientY);
-}, { passive: false });
+  canvas.addEventListener("pointermove", (e) => {
+    if (!state.pointer.active) return;
+    if (state.pointer.id !== null && e.pointerId !== state.pointer.id) return;
 
-function endPointer(e) {
-  if (!state.pointer.active) return;
-  if (state.pointer.id !== null && e.pointerId !== state.pointer.id) return;
+    e.preventDefault();
+    setPointerTargetFromClient(e.clientX, e.clientY);
+  }, { passive: false });
 
-  e.preventDefault();
+  function endPointer(e) {
+    if (!state.pointer.active) return;
+    if (state.pointer.id !== null && e.pointerId !== state.pointer.id) return;
 
-  state.pointer.active = false;
-  state.pointer.id = null;
+    e.preventDefault();
 
-  // When touch ends, freeze target to ring position so it doesn't drift
-  state.mouse.rawX = player.x;
-  state.mouse.rawY = player.y;
-  state.mouse.x = player.x;
-  state.mouse.y = player.y;
-  state.mouse.movedAt = performance.now();
-}
+    state.pointer.active = false;
+    state.pointer.id = null;
 
-canvas.addEventListener("pointerup", endPointer, { passive: false });
-canvas.addEventListener("pointercancel", endPointer, { passive: false });
-canvas.addEventListener("pointerout", endPointer, { passive: false });
-canvas.addEventListener("pointerleave", endPointer, { passive: false });
+    // Freeze target to ring
+    state.mouse.rawX = player.x;
+    state.mouse.rawY = player.y;
+    state.mouse.x = player.x;
+    state.mouse.y = player.y;
+    state.mouse.movedAt = performance.now();
+  }
 
+  canvas.addEventListener("pointerup", endPointer, { passive: false });
+  canvas.addEventListener("pointercancel", endPointer, { passive: false });
+  canvas.addEventListener("pointerout", endPointer, { passive: false });
+  canvas.addEventListener("pointerleave", endPointer, { passive: false });
 
   window.addEventListener("keydown", (e) => {
-    // Always allow M + Escape while menu is up (quality-of-life)
     if (e.code === "KeyM") {
       state.controlMode = (state.controlMode === "mouse") ? "keys" : "mouse";
       showToast(`Mode: ${state.controlMode === "mouse" ? "Mouse" : "Keyboard"}`, 850);
@@ -914,7 +1110,6 @@ canvas.addEventListener("pointerleave", endPointer, { passive: false });
       return;
     }
 
-    // ✅ Ignore key controls when input disabled
     if (!state.inputEnabled) return;
     state.keys.add(e.code);
   });
@@ -958,17 +1153,13 @@ canvas.addEventListener("pointerleave", endPointer, { passive: false });
 
     if (state.over || state.won) resetAll();
 
-    // hide overlay
     ui.overlay.style.display = "none";
 
-    // Start/resume
     if (!state.running) state.running = true;
 
-    // Always begin a fresh 5-second countdown when Start/Resume is pressed
     const now = performance.now();
     beginCountdown(now);
 
-    // Make sure future chaos isn't scheduled too early
     scheduleNextSabotage(now + state.countdownSeconds * 1000);
     scheduleNextMorph(now + state.countdownSeconds * 1000);
 
@@ -983,19 +1174,17 @@ canvas.addEventListener("pointerleave", endPointer, { passive: false });
   // -------------------------
   // Init
   // -------------------------
-  wire.base = makeHellWire(1337);
-  wire.curr = wire.base.map(p => ({ ...p }));
+  wire.base = [];
+  wire.curr = [];
 
   window.addEventListener("resize", resize);
-  resize();
   window.visualViewport?.addEventListener("resize", resize);
-window.visualViewport?.addEventListener("scroll", resize);
+  window.visualViewport?.addEventListener("scroll", resize);
 
+  resize();
 
   ui.maxStrikes.textContent = String(state.maxStrikes);
 
-  // Start with overlay open and input disabled
   setInputEnabled(false);
-
   requestAnimationFrame(tick);
 })();
