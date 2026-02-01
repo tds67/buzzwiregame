@@ -274,20 +274,29 @@ pointer: {
     state.bestProgress = 0;
   }
 
-  function resize() {
-    const dpr = Math.max(1, window.devicePixelRatio || 1);
-    state.w = window.innerWidth;
-    state.h = window.innerHeight;
+function resize() {
+  const dpr = Math.max(1, window.devicePixelRatio || 1);
 
-    canvas.width = Math.floor(state.w * dpr);
-    canvas.height = Math.floor(state.h * dpr);
-    canvas.style.width = state.w + "px";
-    canvas.style.height = state.h + "px";
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const vv = window.visualViewport;
+  state.w = Math.round(vv ? vv.width : window.innerWidth);
+  state.h = Math.round(vv ? vv.height : window.innerHeight);
 
-    rebuildWireSamples();
-    if (!state.running) startPosition();
-  }
+  canvas.width = Math.floor(state.w * dpr);
+  canvas.height = Math.floor(state.h * dpr);
+  canvas.style.width = state.w + "px";
+  canvas.style.height = state.h + "px";
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  // UI scaling for mobile
+  state.uiScale = clamp(Math.min(state.w, state.h) / 800, 0.78, 1.15);
+
+  // Scale ring a bit so it feels consistent across devices
+  player.outerR = 20 * state.uiScale;
+  player.innerR = 13 * state.uiScale;
+
+  rebuildWireSamples();
+  if (!state.running) startPosition();
+}
 
   // -------------------------
   // ✅ Input gating
@@ -586,24 +595,26 @@ function computeControlAccel(dt, t) {
       else ctx.lineTo(p.x, y);
     }
 
-    ctx.strokeStyle = "rgba(240,240,255,0.22)";
-    ctx.lineWidth = 14;
-    ctx.stroke();
+  const sUI = state.uiScale || 1;
 
-    ctx.strokeStyle = "rgba(240,240,255,0.65)";
-    ctx.lineWidth = 6;
-    ctx.stroke();
+ctx.strokeStyle = "rgba(240,240,255,0.22)";
+ctx.lineWidth = 14 * sUI;
+ctx.stroke();
+
+ctx.strokeStyle = "rgba(240,240,255,0.65)";
+ctx.lineWidth = 6 * sUI;
+ctx.stroke();
 
     const start = normToPx(wire.curr[0]);
     const end = normToPx(wire.curr[wire.curr.length - 1]);
 
     ctx.beginPath();
-    ctx.arc(start.x, start.y, 10, 0, Math.PI * 2);
+    ctx.arc(start.x, start.y, 10 * sUI, 0, Math.PI * 2);
     ctx.fillStyle = "rgba(60,255,154,0.85)";
     ctx.fill();
 
     ctx.beginPath();
-    ctx.arc(end.x, end.y, 12, 0, Math.PI * 2);
+ctx.arc(end.x, end.y, 12 * sUI, 0, Math.PI * 2);
     ctx.fillStyle = "rgba(255,107,107,0.9)";
     ctx.fill();
   }
@@ -934,6 +945,9 @@ canvas.addEventListener("pointerleave", endPointer, { passive: false });
 
   window.addEventListener("resize", resize);
   resize();
+  window.visualViewport?.addEventListener("resize", resize);
+window.visualViewport?.addEventListener("scroll", resize);
+
 
   ui.maxStrikes.textContent = String(state.maxStrikes);
 

@@ -25,14 +25,19 @@ html, body {
   position: fixed;
   inset: 0;
   width: 100vw;
-  height: 100vh;
+
+  /* iOS-friendly viewport height */
+  height: 100dvh;
+  height: 100vh; /* fallback */
+
+  touch-action: none;
 }
 
 .hud {
   position: fixed;
-  top: 12px;
-  left: 12px;
-  right: 12px;
+  top: calc(12px + env(safe-area-inset-top));
+  left: calc(12px + env(safe-area-inset-left));
+  right: calc(12px + env(safe-area-inset-right));
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -143,5 +148,18 @@ button.ghost {
   transition: opacity 160ms ease;
   pointer-events: none;
   backdrop-filter: blur(10px);
+  bottom: calc(16px + env(safe-area-inset-bottom));
 }
 .toast.show { opacity: 1; }
+
+body {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+@media (max-width: 520px) {
+  .hud { gap: 6px; }
+  .hud .row { gap: 8px; }
+  .pill { padding: 6px 10px; font-size: 13px; }
+  #tip { display: none; }
+}
