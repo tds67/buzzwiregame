@@ -25,6 +25,13 @@
     return dx * dx + dy * dy;
   };
 
+  function setPointerTarget(clientX, clientY) {
+  state.mouse.rawX = clientX;
+  state.mouse.rawY = clientY;
+  state.mouse.movedAt = performance.now();
+}
+
+
   function showToast(msg, ms = 900) {
     ui.toast.textContent = msg;
     ui.toast.classList.add("show");
@@ -109,6 +116,13 @@
   rawX: 0, rawY: 0,     // raw cursor
   movedAt: 0
 },
+
+pointer: {
+  active: false,
+  id: null,
+  type: "mouse" // "touch" | "pen" | "mouse"
+},
+
 
 
     sabotageText: "No sabotage… yet.",
@@ -382,11 +396,19 @@ state.mouse.movedAt = performance.now();
   // -------------------------
   // Controls
   // -------------------------
-  function computeControlAccel(dt, t) {
+function computeControlAccel(dt, t) {
   if (!state.inputEnabled) return { ax: 0, ay: 0 };
 
   const mode = state.controlMode === "mouse" ? "mouse" : "keys";
-  ui.mode.textContent = mode === "mouse" ? "Mouse" : "Keyboard";
+
+  // HUD label: show Touch/Pen/Mouse when in mouse-mode
+  if (mode === "keys") {
+    ui.mode.textContent = "Keyboard";
+  } else {
+    const p = state.pointer.type;
+    ui.mode.textContent = (p === "touch") ? "Touch" : (p === "pen") ? "Pen" : "Mouse";
+  }
+
 
   let ax = 0, ay = 0;
 
@@ -769,14 +791,56 @@ player.vy *= drag;
   // -------------------------
   // Input listeners
   // -------------------------
-window.addEventListener("mousemove", (e) => {
-  // still ignore during menu/countdown to prevent interference
-  if (!state.inputEnabled) return;
+canvas.addEventListener("pointerdown", (e) => {
+  // Allow pointer tracking only when game input is enabled
+  // BUT we still track pointer state even if disabled, so we can prevent scrolling.
+  e.preventDefault();
 
-  state.mouse.rawX = e.clientX;
-  state.mouse.rawY = e.clientY;
+  state.pointer.active = true;
+  state.pointer.id = e.pointerId;
+  state.pointer.type = e.pointerType || "mouse";
+
+  // Capture ensures we keep getting moves even if finger leaves canvas slightly
+  canvas.setPointerCapture?.(e.pointerId);
+
+  // On mobile, touch should behave like "mouse mode"
+  state.controlMode = "mouse";
+
+  if (state.inputEnabled) setPointerTarget(e.clientX, e.clientY);
+}, { passive: false });
+
+canvas.addEventListener("pointermove", (e) => {
+  if (!state.pointer.active) return;
+  if (state.pointer.id !== null && e.pointerId !== state.pointer.id) return;
+
+  e.preventDefault();
+
+  if (!state.inputEnabled) return;
+  setPointerTarget(e.clientX, e.clientY);
+}, { passive: false });
+
+function endPointer(e) {
+  if (!state.pointer.active) return;
+  if (state.pointer.id !== null && e.pointerId !== state.pointer.id) return;
+
+  e.preventDefault();
+
+  state.pointer.active = false;
+  state.pointer.id = null;
+
+  // When touch ends, freeze target to ring position so it doesn't drift
+  state.mouse.rawX = player.x;
+  state.mouse.rawY = player.y;
+  state.mouse.x = player.x;
+  state.mouse.y = player.y;
   state.mouse.movedAt = performance.now();
-});
+}
+
+canvas.addEventListener("pointerup", endPointer, { passive: false });
+canvas.addEventListener("pointercancel", endPointer, { passive: false });
+canvas.addEventListener("pointerout", endPointer, { passive: false });
+canvas.addEventListener("pointerleave", endPointer, { passive: false });
+
 
   window.addEventListener("keydown", (e) => {
     // Always allow M + Escape while menu is up (quality-of-life)
