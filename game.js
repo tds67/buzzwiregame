@@ -817,7 +817,7 @@ canvas.addEventListener("pointerdown", (e) => {
   // On mobile, touch should behave like "mouse mode"
   state.controlMode = "mouse";
 
-  if (state.inputEnabled) setPointerTarget(e.clientX, e.clientY);
+ setPointerTarget(e.clientX, e.clientY);
 }, { passive: false });
 
 canvas.addEventListener("pointermove", (e) => {
@@ -825,9 +825,7 @@ canvas.addEventListener("pointermove", (e) => {
   if (state.pointer.id !== null && e.pointerId !== state.pointer.id) return;
 
   e.preventDefault();
-
-  if (!state.inputEnabled) return;
-  setPointerTarget(e.clientX, e.clientY);
+setPointerTarget(e.clientX, e.clientY);
 }, { passive: false });
 
 function endPointer(e) {
